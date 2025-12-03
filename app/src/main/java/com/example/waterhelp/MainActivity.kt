@@ -6,6 +6,7 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.KeyboardOptions
@@ -37,7 +38,7 @@ import java.time.format.DateTimeFormatter
 import java.util.Locale
 import kotlin.math.abs
 
-// --- VIEWMODEL: Lógica de negocio ---
+// --- VIEWMODEL ---
 class MainViewModel(private val db: AppDatabase, private val prefs: PreferencesManager) : ViewModel() {
 
     private val _selectedDate = MutableStateFlow(LocalDate.now())
@@ -50,7 +51,8 @@ class MainViewModel(private val db: AppDatabase, private val prefs: PreferencesM
         db.dao().getLitersByDate(date.toEpochDay()).map { it ?: 0.0 }
     }.stateIn(viewModelScope, SharingStarted.Lazily, 0.0)
 
-    val history = db.dao().getHistory(LocalDate.now().minusDays(6).toEpochDay())
+    // CAMBIO: Ahora obtenemos TODO el historial
+    val history = db.dao().getAllHistory()
         .stateIn(viewModelScope, SharingStarted.Lazily, emptyList())
 
     fun setDate(date: LocalDate) { _selectedDate.value = date }
@@ -155,7 +157,7 @@ fun WaterScreen(viewModel: MainViewModel) {
             }
         }
 
-        // 2. Tarjeta de Límite
+        // 2. Límite
         Card(modifier = Modifier.fillMaxWidth()) {
             Column(modifier = Modifier.padding(16.dp)) {
                 Text("Tu Límite Diario: ${limit.toInt()} Litros", fontWeight = FontWeight.Bold)
@@ -177,7 +179,7 @@ fun WaterScreen(viewModel: MainViewModel) {
             }
         }
 
-        // 3. Selección de Fecha (CORREGIDO CON BOX)
+        // 3. Selección de Fecha
         Box(modifier = Modifier.fillMaxWidth()) {
             OutlinedTextField(
                 value = date.format(DateTimeFormatter.ofPattern("dd MMMM yyyy", Locale.getDefault())),
@@ -194,7 +196,6 @@ fun WaterScreen(viewModel: MainViewModel) {
                     disabledTrailingIconColor = MaterialTheme.colorScheme.onSurfaceVariant
                 )
             )
-            // Este Box ahora está dentro de otro Box, así que matchParentSize funciona
             Box(Modifier.matchParentSize().clickable { dateDialog.show() })
         }
 
@@ -218,7 +219,7 @@ fun WaterScreen(viewModel: MainViewModel) {
             }) { Text("Añadir") }
         }
 
-        // 5. Resumen y Mensajes
+        // 5. Resumen del Día
         Card(
             colors = CardDefaults.cardColors(
                 containerColor = if(isOverLimit) Color(0xFFFFEBEE) else Color(0xFFE8F5E9)
@@ -236,38 +237,53 @@ fun WaterScreen(viewModel: MainViewModel) {
             }
         }
 
-        // 6. Gráfica de Barras
-        Text("Historial (Últimos 7 días)", fontWeight = FontWeight.Bold, modifier = Modifier.padding(top=16.dp))
+        // 6. Gráfica Histórica
+        Text("Historial de Consumo", fontWeight = FontWeight.Bold, modifier = Modifier.padding(top=16.dp))
 
         if (history.isNotEmpty()) {
             BarChart(data = history)
         } else {
-            Text("No hay datos suficientes aún.", color = Color.Gray)
+            Text("No hay datos registrados aún.", color = Color.Gray)
         }
     }
 }
 
+// GRÁFICA CORREGIDA: Muestra todo, rellena huecos y tiene scroll
 @Composable
 fun BarChart(data: List<WaterRecord>) {
+    // 1. Agrupar datos por fecha y sumar litros
     val groupedData = data.groupBy { it.date }
         .mapValues { it.value.sumOf { r -> r.liters } }
 
+    // 2. Encontrar fecha mínima y máxima para crear el rango continuo
+    val minDate = groupedData.keys.minOrNull() ?: LocalDate.now().toEpochDay()
+    val maxDate = groupedData.keys.maxOrNull() ?: LocalDate.now().toEpochDay()
+    // Rango completo de días (pasados y futuros registrados)
+    val daysRange = (minDate..maxDate).toList()
+
     val maxVal = groupedData.values.maxOrNull()?.toFloat() ?: 100f
 
-    val today = LocalDate.now().toEpochDay()
-    val last7Days = (6 downTo 0).map { today - it }
+    // Scroll Horizontal
+    val scrollState = rememberScrollState()
+
+    // Auto-scroll al final (fecha más reciente/futura) cuando cargan datos
+    LaunchedEffect(data) {
+        scrollState.animateScrollTo(scrollState.maxValue)
+    }
 
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .height(200.dp)
-            .padding(top = 16.dp),
-        horizontalArrangement = Arrangement.SpaceBetween,
+            .height(250.dp)
+            .horizontalScroll(scrollState) // <--- Permite deslizar si hay muchos días
+            .padding(top = 16.dp, bottom = 8.dp),
+        horizontalArrangement = Arrangement.spacedBy(12.dp), // Espacio entre barras
         verticalAlignment = Alignment.Bottom
     ) {
-        last7Days.forEach { dayEpoch ->
+        daysRange.forEach { dayEpoch ->
             val value = groupedData[dayEpoch]?.toFloat() ?: 0f
 
+            // Cálculos visuales
             val heightRatio = if (maxVal > 0) value / maxVal else 0f
             val barHeight = if (value > 0) heightRatio else 0.01f
 
@@ -276,7 +292,7 @@ fun BarChart(data: List<WaterRecord>) {
 
             Column(
                 horizontalAlignment = Alignment.CenterHorizontally,
-                modifier = Modifier.weight(1f)
+                modifier = Modifier.width(45.dp) // Ancho fijo por columna
             ) {
                 if (value > 0) {
                     Text(String.format("%.0f", value), fontSize = 10.sp, color = Color.Gray)
@@ -284,12 +300,12 @@ fun BarChart(data: List<WaterRecord>) {
                 Spacer(Modifier.height(4.dp))
                 Box(
                     modifier = Modifier
-                        .fillMaxWidth(0.6f)
+                        .width(24.dp)
                         .fillMaxHeight(barHeight)
                         .background(MaterialTheme.colorScheme.primary)
                 )
                 Spacer(Modifier.height(4.dp))
-                Text(dateLabel, fontSize = 10.sp)
+                Text(dateLabel, fontSize = 10.sp, maxLines = 1)
             }
         }
     }
